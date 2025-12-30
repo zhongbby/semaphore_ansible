@@ -1,0 +1,15 @@
+---
+- name: 测试 Ansible 连接并获取安全信息
+  hosts: my_servers
+  gather_facts: true  # 收集系统信息，这是只读操作，绝对安全
+  tasks:
+    - name: 测试主机连通性
+      ansible.builtin.ping:
+
+    - name: 打印目标主机的基本信息
+      ansible.builtin.debug:
+        msg: |
+          成功连接到主机：`{{ ansible_hostname }}`
+          该系统是：`{{ ansible_distribution }} {{ ansible_distribution_version }}`
+          系统架构：`{{ ansible_architecture }}`
+      # 这些 `ansible_` 开头的变量是由 `gather_facts: true` 自动提供的，仅用于读取。
