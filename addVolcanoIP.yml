@@ -1,43 +1,87 @@
 ---
-- name: 诊断并可靠地插入防火墙规则
+- name: 检查并插入防火墙规则（幂等版本）
   hosts: my_servers
   become: yes
   gather_facts: false
   vars:
-    target_line: 'iptables -A INPUT -s 58.23.3.114/32 -p tcp -m tcp -j ACCEPT'
+    # 定义要检查/插入的两条规则
+    new_tcp_rule: 'iptables -A INPUT -s 118.145.0.0/16 -p tcp -m tcp -j ACCEPT'
+    new_udp_rule: 'iptables -A INPUT -s 118.145.0.0/16 -p udp -m udp -j ACCEPT'
+    # 定义锚点行（在它之前插入）
+    anchor_rule: 'iptables -A INPUT -s 58.23.3.114/32 -p tcp -m tcp -j ACCEPT'
+    
   tasks:
-    # 1. 首先，确保目标行存在并获取其原始格式
-    - name: 检查目标行是否存在
+    # 第一步：检查规则是否已存在（在任何位置）
+    - name: 检查TCP规则是否已存在
       ansible.builtin.shell: |
-        grep -n '{{ target_line }}' /sbin/rules.sh | head -1
-      register: target_line_check
+        grep -Fx "{{ new_tcp_rule }}" /sbin/rules.sh
+      register: check_tcp
       changed_when: false
-      failed_when: false  # 即使没找到也不让任务失败
+      failed_when: false  # 即使grep没找到（返回非0）也不使任务失败
 
-    - name: 显示目标行检查结果
-      ansible.builtin.debug:
-        var: target_line_check.stdout
+    - name: 检查UDP规则是否已存在
+      ansible.builtin.shell: |
+        grep -Fx "{{ new_udp_rule }}" /sbin/rules.sh
+      register: check_udp
+      changed_when: false
+      failed_when: false
 
-    # 2. 使用目标行的原始内容作为锚点进行插入（这是关键！）
-    - name: (修复) 插入第一条TCP规则
+    # 第二步：根据检查结果，决定是否需要插入
+    - name: 获取锚点行的实际内容
+      ansible.builtin.shell: |
+        grep -n "{{ anchor_rule }}" /sbin/rules.sh | head -1
+      register: anchor_line_check
+      changed_when: false
+      failed_when: false
+      when: 
+        - check_tcp.stdout == ""  # 仅当TCP规则不存在时执行
+        - check_udp.stdout == ""  # 仅当UDP规则不存在时执行
+
+    # 第三步：执行插入（仅当两条规则都不存在时）
+    - name: 插入TCP规则
       ansible.builtin.lineinfile:
         path: /sbin/rules.sh
-        # 使用从文件中实际读出的行进行匹配，避免正则转义问题
-        insertbefore: '{{ target_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if target_line_check.stdout_lines | length > 0 else target_line }}'
-        line: 'iptables -A INPUT -s 118.145.0.0/16 -p tcp -m tcp -j ACCEPT'
-      register: step1
+        # 动态获取锚点行内容（去除grep返回的行号）
+        insertbefore: '{{ anchor_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if anchor_line_check.stdout_lines | length > 0 else anchor_rule }}'
+        line: '{{ new_tcp_rule }}'
+      register: insert_tcp
+      when: 
+        - check_tcp.stdout == ""
+        - check_udp.stdout == ""
+        - anchor_line_check.stdout != ""  # 确保找到了锚点行
 
-    - name: (修复) 插入第二条UDP规则
+    - name: 插入UDP规则
       ansible.builtin.lineinfile:
         path: /sbin/rules.sh
-        insertbefore: '{{ target_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if target_line_check.stdout_lines | length > 0 else target_line }}'
-        line: 'iptables -A INPUT -s 118.145.0.0/16 -p udp -m udp -j ACCEPT'
-      register: step2
+        insertbefore: '{{ anchor_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if anchor_line_check.stdout_lines | length > 0 else anchor_rule }}'
+        line: '{{ new_udp_rule }}'
+      register: insert_udp
+      when: 
+        - check_tcp.stdout == ""
+        - check_udp.stdout == ""
+        - anchor_line_check.stdout != ""
 
-    - name: 显示最终结果
+    # 第四步：汇总报告
+    - name: 显示执行结果报告
       ansible.builtin.debug:
         msg: |
-          操作完成。状态报告：
-          - 目标行检查: {{ '找到' if target_line_check.stdout else '未找到' }}
-          - TCP规则插入: {{ '成功' if step1.changed else '未改变' }}
-          - UDP规则插入: {{ '成功' if step2.changed else '未改变' }}
+          ============ 规则检查与插入报告 ============
+          目标服务器: {{ inventory_hostname }}
+          
+          检查结果:
+          - TCP规则 ({{ new_tcp_rule | truncate(50) }}): {{ "已存在" if check_tcp.stdout != "" else "未找到" }}
+          - UDP规则 ({{ new_udp_rule | truncate(50) }}): {{ "已存在" if check_udp.stdout != "" else "未找到" }}
+          
+          执行结果:
+          {% if check_tcp.stdout != "" and check_udp.stdout != "" %}
+          ✅ 两条规则均已存在，无需任何操作。
+          {% elif anchor_line_check.stdout == "" %}
+          ⚠️  未找到锚点行 '{{ anchor_rule }}'，无法插入新规则。
+          {% elif check_tcp.stdout == "" and check_udp.stdout == "" %}
+          🔧 已执行插入操作:
+             TCP规则: {{ "插入成功" if insert_tcp.changed else "插入失败或未执行" }}
+             UDP规则: {{ "插入成功" if insert_udp.changed else "插入失败或未执行" }}
+          {% else %}
+          ⚠️  规则状态不一致（一条有一条例外），请手动检查文件。
+          {% endif %}
+          ===========================================
