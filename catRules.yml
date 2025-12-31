@@ -5,7 +5,7 @@
   tasks:
     - name: 在 /sbin/rules.sh 中查找包含 118.145.0.0 的行
       ansible.builtin.shell: |
-        cat /sbin/rules.sh 2>/dev/null | grep -- "118.145.0.0" || echo "文件不存在或未找到匹配项"
+        cat /sbin/rules.sh 2>/dev/null | grep -- "47.107.0.0/16" || echo "文件不存在或未找到匹配项"
       register: grep_result  # 将命令结果保存到变量中
       ignore_errors: true    # 即使命令失败（如文件不存在）也继续执行
       changed_when: false    # 此命令为查询操作，不会改变系统状态，输出始终为“OK”
