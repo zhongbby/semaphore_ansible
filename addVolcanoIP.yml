@@ -1,5 +1,5 @@
 ---
-- name: 检查并插入防火墙规则（幂等版本）
+- name: 检查并插入防火墙规则（带文件检查的幂等版本）
   hosts: my_servers
   become: yes
   gather_facts: false
@@ -9,64 +9,91 @@
     new_udp_rule: 'iptables -A INPUT -s 118.145.0.0/16 -p udp -m udp -j ACCEPT'
     # 定义锚点行（在它之前插入）
     anchor_rule: 'iptables -A INPUT -s 58.23.3.114/32 -p tcp -m tcp -j ACCEPT'
+    # 定义规则文件路径
+    rules_file: '/sbin/rules.sh'
     
   tasks:
-    # 第一步：检查规则是否已存在（在任何位置）
+    # 第一步：检查规则文件是否存在
+    - name: 检查规则文件是否存在
+      ansible.builtin.stat:
+        path: "{{ rules_file }}"
+      register: file_check
+
+    # 第二步：如果文件不存在，跳过并提示，继续下一台主机
+    - name: 提示文件不存在并跳过
+      ansible.builtin.debug:
+        msg: "⚠️  规则文件 {{ rules_file }} 不存在，跳过此主机的规则插入。"
+      when: not file_check.stat.exists
+      changed_when: false
+
+    # 第三步：仅当文件存在时，执行规则检查和插入
+    # 3.1 检查规则是否已存在（在任何位置）
     - name: 检查TCP规则是否已存在
       ansible.builtin.shell: |
-        grep -Fx "{{ new_tcp_rule }}" /sbin/rules.sh
+        grep -Fx "{{ new_tcp_rule }}" "{{ rules_file }}"
       register: check_tcp
       changed_when: false
-      failed_when: false  # 即使grep没找到（返回非0）也不使任务失败
+      failed_when: false
+      when: file_check.stat.exists
 
     - name: 检查UDP规则是否已存在
       ansible.builtin.shell: |
-        grep -Fx "{{ new_udp_rule }}" /sbin/rules.sh
+        grep -Fx "{{ new_udp_rule }}" "{{ rules_file }}"
       register: check_udp
       changed_when: false
       failed_when: false
+      when: file_check.stat.exists
 
-    # 第二步：根据检查结果，决定是否需要插入
+    # 3.2 根据检查结果，决定是否需要插入
     - name: 获取锚点行的实际内容
       ansible.builtin.shell: |
-        grep -n "{{ anchor_rule }}" /sbin/rules.sh | head -1
+        grep -n "{{ anchor_rule }}" "{{ rules_file }}" | head -1
       register: anchor_line_check
       changed_when: false
       failed_when: false
       when: 
-        - check_tcp.stdout == ""  # 仅当TCP规则不存在时执行
-        - check_udp.stdout == ""  # 仅当UDP规则不存在时执行
+        - file_check.stat.exists
+        - check_tcp.stdout == ""
+        - check_udp.stdout == ""
 
-    # 第三步：执行插入（仅当两条规则都不存在时）
+    # 3.3 执行插入（仅当两条规则都不存在时）
     - name: 插入TCP规则
       ansible.builtin.lineinfile:
-        path: /sbin/rules.sh
+        path: "{{ rules_file }}"
         # 动态获取锚点行内容（去除grep返回的行号）
         insertbefore: '{{ anchor_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if anchor_line_check.stdout_lines | length > 0 else anchor_rule }}'
         line: '{{ new_tcp_rule }}'
       register: insert_tcp
       when: 
-        - check_tcp.stdout == ""
-        - check_udp.stdout == ""
-        - anchor_line_check.stdout != ""  # 确保找到了锚点行
-
-    - name: 插入UDP规则
-      ansible.builtin.lineinfile:
-        path: /sbin/rules.sh
-        insertbefore: '{{ anchor_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if anchor_line_check.stdout_lines | length > 0 else anchor_rule }}'
-        line: '{{ new_udp_rule }}'
-      register: insert_udp
-      when: 
+        - file_check.stat.exists
         - check_tcp.stdout == ""
         - check_udp.stdout == ""
         - anchor_line_check.stdout != ""
 
-    # 第四步：汇总报告
+    - name: 插入UDP规则
+      ansible.builtin.lineinfile:
+        path: "{{ rules_file }}"
+        insertbefore: '{{ anchor_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if anchor_line_check.stdout_lines | length > 0 else anchor_rule }}'
+        line: '{{ new_udp_rule }}'
+      register: insert_udp
+      when: 
+        - file_check.stat.exists
+        - check_tcp.stdout == ""
+        - check_udp.stdout == ""
+        - anchor_line_check.stdout != ""
+
+    # 第四步：汇总报告（区分文件存在和不存在的情况）
     - name: 显示执行结果报告
       ansible.builtin.debug:
         msg: |
           ============ 规则检查与插入报告 ============
           目标服务器: {{ inventory_hostname }}
+          
+          {% if not file_check.stat.exists %}
+          📄 文件状态: 规则文件 {{ rules_file }} 不存在，已跳过此主机。
+          
+          {% else %}
+          📄 文件状态: 规则文件存在。
           
           检查结果:
           - TCP规则 ({{ new_tcp_rule | truncate(50) }}): {{ "已存在" if check_tcp.stdout != "" else "未找到" }}
@@ -83,5 +110,6 @@
              UDP规则: {{ "插入成功" if insert_udp.changed else "插入失败或未执行" }}
           {% else %}
           ⚠️  规则状态不一致（一条有一条例外），请手动检查文件。
+          {% endif %}
           {% endif %}
           ===========================================
