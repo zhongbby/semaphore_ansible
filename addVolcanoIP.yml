@@ -1,27 +1,43 @@
 ---
-- name: 精确且隐形地在指定行前插入规则
+- name: 诊断并可靠地插入防火墙规则
   hosts: my_servers
   become: yes
   gather_facts: false
+  vars:
+    target_line: 'iptables -A INPUT -s 58.23.3.114/32 -p tcp -m tcp -j ACCEPT'
   tasks:
-    - name: 插入第一条TCP规则 (紧贴目标行上方)
+    # 1. 首先，确保目标行存在并获取其原始格式
+    - name: 检查目标行是否存在
+      ansible.builtin.shell: |
+        grep -n '{{ target_line }}' /sbin/rules.sh | head -1
+      register: target_line_check
+      changed_when: false
+      failed_when: false  # 即使没找到也不让任务失败
+
+    - name: 显示目标行检查结果
+      ansible.builtin.debug:
+        var: target_line_check.stdout
+
+    # 2. 使用目标行的原始内容作为锚点进行插入（这是关键！）
+    - name: (修复) 插入第一条TCP规则
       ansible.builtin.lineinfile:
         path: /sbin/rules.sh
-        insertbefore: '^iptables -A INPUT -s 58\\.23\\.3\\.114/32 -p tcp -m tcp -j ACCEPT'
+        # 使用从文件中实际读出的行进行匹配，避免正则转义问题
+        insertbefore: '{{ target_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if target_line_check.stdout_lines | length > 0 else target_line }}'
         line: 'iptables -A INPUT -s 118.145.0.0/16 -p tcp -m tcp -j ACCEPT'
       register: step1
 
-    # 第二步：此时目标行已下移，我们仍在其“前”插入UDP规则
-    - name: 插入第二条UDP规则 (紧贴目标行上方)
+    - name: (修复) 插入第二条UDP规则
       ansible.builtin.lineinfile:
         path: /sbin/rules.sh
-        insertbefore: '^iptables -A INPUT -s 58\\.23\\.3\\.114/32 -p tcp -m tcp -j ACCEPT'
+        insertbefore: '{{ target_line_check.stdout_lines[0] | regex_replace("^[0-9]+:", "") if target_line_check.stdout_lines | length > 0 else target_line }}'
         line: 'iptables -A INPUT -s 118.145.0.0/16 -p udp -m udp -j ACCEPT'
       register: step2
 
-    - name: 显示结果
+    - name: 显示最终结果
       ansible.builtin.debug:
         msg: |
-          插入完成。状态:
-          规则1(TCP): {{ '已添加' if step1.changed else '已存在' }}
-          规则2(UDP): {{ '已添加' if step2.changed else '已存在' }}
+          操作完成。状态报告：
+          - 目标行检查: {{ '找到' if target_line_check.stdout else '未找到' }}
+          - TCP规则插入: {{ '成功' if step1.changed else '未改变' }}
+          - UDP规则插入: {{ '成功' if step2.changed else '未改变' }}
