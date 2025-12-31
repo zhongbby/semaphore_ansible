@@ -1,0 +1,22 @@
+---
+- name: 在防火墙规则中插入新的IP放行规则
+  hosts: my_servers
+  become: yes  # 修改系统文件通常需要root权限
+  gather_facts: false
+  tasks:
+    - name: 在特定TCP规则行前插入新的118.145.0.0/16规则
+      ansible.builtin.replace:
+        path: /sbin/rules.sh
+        regexp: '^(iptables -A INPUT -s 58\.23\.3\.114/32 -p tcp -m tcp -j ACCEPT)$'
+        replace: |2
+                iptables -A INPUT -s 118.145.0.0/16 -p tcp -m tcp -j ACCEPT
+                iptables -A INPUT -s 118.145.0.0/16 -p udp -m udp -j ACCEPT
+                \1
+      register: replace_result
+      # 注意：这里假设你要插入的是 TCP 和 UDP 两条规则。
+      # 如果你的需求是插入两条完全相同的TCP规则，请将第二行中的 udp 改为 tcp。
+
+    - name: 显示文件修改结果
+      ansible.builtin.debug:
+        msg: "文件 {{ path }} 已被修改。替换操作的结果已注册到变量 'replace_result' 中。"
+      when: replace_result is changed
