@@ -1,28 +1,27 @@
 ---
-- name: 在防火墙规则中插入新的IP放行规则（修正版）
+- name: 精确且隐形地在指定行前插入规则
   hosts: my_servers
   become: yes
   gather_facts: false
   tasks:
-    # 首先，在58.23.3.114的TCP规则行前插入第一条TCP规则
-    - name: 插入 118.145.0.0/16 TCP规则
+    - name: 插入第一条TCP规则 (紧贴目标行上方)
       ansible.builtin.lineinfile:
         path: /sbin/rules.sh
         insertbefore: '^iptables -A INPUT -s 58\\.23\\.3\\.114/32 -p tcp -m tcp -j ACCEPT'
         line: 'iptables -A INPUT -s 118.145.0.0/16 -p tcp -m tcp -j ACCEPT'
-      register: insert_tcp
+      register: step1
 
-    # 然后，在同一个位置前再插入UDP规则（此时位置参考线已更新）
-    - name: 插入 118.145.0.0/16 UDP规则
+    # 第二步：此时目标行已下移，我们仍在其“前”插入UDP规则
+    - name: 插入第二条UDP规则 (紧贴目标行上方)
       ansible.builtin.lineinfile:
         path: /sbin/rules.sh
         insertbefore: '^iptables -A INPUT -s 58\\.23\\.3\\.114/32 -p tcp -m tcp -j ACCEPT'
         line: 'iptables -A INPUT -s 118.145.0.0/16 -p udp -m udp -j ACCEPT'
-      register: insert_udp
+      register: step2
 
-    - name: 显示修改结果
+    - name: 显示结果
       ansible.builtin.debug:
         msg: |
-          文件 /sbin/rules.sh 已修改。
-          TCP规则插入: {{ '成功' if insert_tcp.changed else '已存在' }}
-          UDP规则插入: {{ '成功' if insert_udp.changed else '已存在' }}
+          插入完成。状态:
+          规则1(TCP): {{ '已添加' if step1.changed else '已存在' }}
+          规则2(UDP): {{ '已添加' if step2.changed else '已存在' }}
